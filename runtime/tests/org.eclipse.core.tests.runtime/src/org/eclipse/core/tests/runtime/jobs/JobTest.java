@@ -40,6 +40,7 @@ import org.eclipse.core.internal.jobs.InternalJob;
 import org.eclipse.core.internal.jobs.JobListeners;
 import org.eclipse.core.internal.jobs.JobManager;
 import org.eclipse.core.internal.jobs.Worker;
+import org.eclipse.core.runtime.ICoreRunnable;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.OperationCanceledException;
@@ -1004,6 +1005,44 @@ public class JobTest extends AbstractJobTest {
 		}
 	}
 
+	@Test
+	void testName() throws Exception {
+		ISchedulingRule ruleSluggish = new PathRule("a");
+		ISchedulingRule ruleFast = new PathRule("a/b");
+
+		assertTrue(ruleSluggish.isConflicting(ruleFast));
+
+		Job sluggish = Job.create("Sluggish", doTimed(ruleSluggish, 13_000));
+		sluggish.schedule();
+
+		// This one should be blocked by the other one
+		Job fast = Job.create("Fast", doTimed(ruleFast, 100));
+		fast.schedule();
+
+		fast.join();
+	}
+
+	private ICoreRunnable doTimed(ISchedulingRule r, long durationMillis) {
+		return (ICoreRunnable) __ -> {
+
+			long start = System.currentTimeMillis();
+			System.out.println("Started " + r);
+
+			Job.getJobManager().beginRule(r, null);
+			long d1 = System.currentTimeMillis() - start;
+			System.out.println("Waited " + d1 + " ms for the rule");
+
+			try {
+				Thread.sleep(durationMillis);
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+			}
+
+			Job.getJobManager().endRule(r);
+			d1 = System.currentTimeMillis() - d1;
+			System.out.println("Ended " + r + " after another " + d1 + " ms");
+		};
+	}
 	@Test
 	public void testJoinInterruptNonUIThread() throws InterruptedException {
 		TestBarrier2 barrier = new TestBarrier2();

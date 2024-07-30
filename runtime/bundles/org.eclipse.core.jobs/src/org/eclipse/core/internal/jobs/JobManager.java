@@ -28,12 +28,19 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import jdk.jfr.Category;
+import jdk.jfr.Event;
+import jdk.jfr.Label;
+import jdk.jfr.Name;
+import jdk.jfr.Threshold;
 import org.eclipse.core.internal.runtime.RuntimeLog;
 import org.eclipse.core.runtime.Assert;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -77,6 +84,17 @@ import org.eclipse.osgi.util.NLS;
  * InternalJob.jobStateLock or InternalJobGroup.jobGroupStateLock
  */
 public class JobManager implements IJobManager, DebugOptionsListener {
+	@Name("JobManager.RuleBlock")
+	@Label("Job manager events")
+	@Threshold("20 ms")
+	@Category({ "Eclipse", "Jobs" })
+	class RuleBlockEvent extends Event {
+		@Label("Rule")
+		String rule;
+
+		@Label("Rule ID")
+		int ruleId;
+	}
 
 	private static final int NANOS_IN_MS = 1_000_000;
 
@@ -239,6 +257,8 @@ public class JobManager implements IJobManager, DebugOptionsListener {
 
 	private final InternalWorker internalWorker;
 
+	private Map<ISchedulingRule, RuleBlockEvent> ruleToBlockEvent = new HashMap<>();
+
 	public static void debug(String msg) {
 		DEBUG_TRACE.trace(null, msg);
 	}
@@ -339,6 +359,15 @@ public class JobManager implements IJobManager, DebugOptionsListener {
 
 	@Override
 	public void beginRule(ISchedulingRule rule, IProgressMonitor monitor) {
+		if (rule != null) {
+			RuleBlockEvent evt = new RuleBlockEvent();
+			evt.rule = rule.toString();
+			evt.ruleId = rule.hashCode();
+
+			ruleToBlockEvent.put(rule, evt);
+			evt.begin();
+		}
+
 		validateRule(rule);
 		implicitJobs.begin(rule, monitorFor(monitor), false);
 	}
@@ -796,6 +825,11 @@ public class JobManager implements IJobManager, DebugOptionsListener {
 	@Override
 	public void endRule(ISchedulingRule rule) {
 		implicitJobs.end(rule, false);
+		RuleBlockEvent evt = (rule != null) ? ruleToBlockEvent.remove(rule) : null;
+
+		if (evt != null) {
+			evt.commit();
+		}
 	}
 
 	@Override

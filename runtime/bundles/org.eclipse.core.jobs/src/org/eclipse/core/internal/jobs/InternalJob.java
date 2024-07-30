@@ -22,14 +22,59 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
-import org.eclipse.core.runtime.*;
-import org.eclipse.core.runtime.jobs.*;
+import jdk.jfr.Category;
+import jdk.jfr.Event;
+import jdk.jfr.Label;
+import jdk.jfr.Name;
+import org.eclipse.core.runtime.Assert;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.ListenerList;
+import org.eclipse.core.runtime.OperationCanceledException;
+import org.eclipse.core.runtime.PlatformObject;
+import org.eclipse.core.runtime.QualifiedName;
+import org.eclipse.core.runtime.jobs.IJobChangeListener;
+import org.eclipse.core.runtime.jobs.ISchedulingRule;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.jobs.JobGroup;
+import org.eclipse.core.runtime.jobs.MultiRule;
 
 /**
  * Internal implementation class for jobs. Clients must not implement this class
  * directly.  All jobs must be subclasses of the API <code>org.eclipse.core.runtime.jobs.Job</code> class.
  */
 public abstract class InternalJob extends PlatformObject implements Comparable<InternalJob> {
+	@Name("Job")
+	@Label("Job events")
+	@Category({ "Eclipse", "Jobs" })
+	class JobEvent extends Event {
+		@Label("Job name")
+		String jobName;
+
+		@Label("None duration (ms)")
+		long noneDurationMillis;
+
+		@Label("Sleep duration (ms)")
+		long sleepDurationMillis;
+
+		@Label("Waiting duration (ms)")
+		long waitingDurationMillis;
+
+		@Label("Running duration (ms)")
+		long runningDurationMillis;
+
+		@Label("Priority")
+		int prio;
+
+		@Label("Startup delay")
+		long delay;
+
+		@Label("Reschedule")
+		boolean reschedule;
+	}
+
+	private JobEvent evt;
+
 	/**
 	 * Job state code (value 16) indicating that a job has been removed from
 	 * the wait queue and is about to start running. From an API point of view,
@@ -163,6 +208,8 @@ public abstract class InternalJob extends PlatformObject implements Comparable<I
 	final ReentrantLock eventQueueLock = new ReentrantLock();
 	final AtomicReference<Thread> eventQueueThread = new AtomicReference<>();
 
+	private long lastStateCheckpointMillis;
+
 	private static synchronized int getNextJobNumber() {
 		return nextJobNumber++;
 	}
@@ -170,6 +217,14 @@ public abstract class InternalJob extends PlatformObject implements Comparable<I
 	protected InternalJob(String name) {
 		Assert.isNotNull(name);
 		this.name = name;
+		createEvt();
+	}
+
+	private void createEvt() {
+		evt = new JobEvent();
+		lastStateCheckpointMillis = System.currentTimeMillis();
+		evt.jobName = name;
+		evt.prio = getPriority();
 	}
 
 	protected void addJobChangeListener(IJobChangeListener listener) {
@@ -309,7 +364,44 @@ public abstract class InternalJob extends PlatformObject implements Comparable<I
 	 * Must be called from JobManager#changeState
 	 */
 	final void internalSetState(int i) {
+		int current = getState();
+
+		long stateCheckpoint = System.currentTimeMillis();
+		long durationMillis = stateCheckpoint - lastStateCheckpointMillis;
+
+		switch (current) {
+		case Job.NONE:
+			evt.noneDurationMillis = durationMillis;
+			break;
+		case Job.SLEEPING:
+			evt.sleepDurationMillis = durationMillis;
+			break;
+		case Job.WAITING:
+			evt.waitingDurationMillis = durationMillis;
+			break;
+		case Job.RUNNING:
+			evt.runningDurationMillis = durationMillis;
+			break;
+		default:
+			throw new RuntimeException("Non-existing state: " + current);
+		}
+
+		lastStateCheckpointMillis = stateCheckpoint;
+
 		flags = (flags & ~M_STATE) | i;
+
+		// If coming (back) to the NONE state, the job is finished.
+		if (i == Job.NONE) {
+			if (shouldSchedule()) {
+				evt.reschedule = true;
+			}
+			evt.commit();
+
+			if (shouldSchedule()) {
+				// Create an event for the next run
+				createEvt();
+			}
+		}
 	}
 
 	/**
@@ -392,8 +484,10 @@ public abstract class InternalJob extends PlatformObject implements Comparable<I
 	protected abstract IStatus run(IProgressMonitor progressMonitor);
 
 	protected void schedule(long delay) {
-		if (shouldSchedule())
+		if (shouldSchedule()) {
+			evt.delay = delay;
 			manager.schedule(this, delay);
+		}
 	}
 
 	/**
@@ -446,6 +540,7 @@ public abstract class InternalJob extends PlatformObject implements Comparable<I
 			default :
 				throw new IllegalArgumentException(String.valueOf(newPriority));
 		}
+		evt.prio = priority;
 	}
 
 	protected void setProgressGroup(IProgressMonitor group, int ticks) {
