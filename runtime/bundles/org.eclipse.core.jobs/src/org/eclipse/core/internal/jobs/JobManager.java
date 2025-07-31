@@ -24,7 +24,8 @@
  *******************************************************************************/
 package org.eclipse.core.internal.jobs;
 
-// hola
+// hola de nuevo
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
